@@ -1,10 +1,11 @@
 const BASE = "http://127.0.0.1:8000/api/v1";
 
-export async function grantConsent({ subject_id, purpose, meta }) {
+export async function grantConsent({ subject_id, data_use_case, meta }) {
+  const body = { subject_id, data_use_case, purpose: data_use_case, meta };
   const res = await fetch(`${BASE}/consents`, {
     method: "POST",
     headers: {"Content-Type":"application/json"},
-    body: JSON.stringify({ subject_id, purpose, meta }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`Grant failed: ${res.status}`);
   return res.json();
