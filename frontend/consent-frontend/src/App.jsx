@@ -3,6 +3,7 @@ import { grantConsent, listConsents, revokeConsent, listAudit } from "./api";
 import AuditTimeline from "./components/AuditTimeline";
 import StatusChip from "./components/StatusChip";
 import InlineMessage from "./components/InlineMessage";
+import OperatorBar from "./components/OperatorBar";
 
 // CSV export helper for audit
 function exportCSV(events) {
@@ -43,6 +44,10 @@ export default function App() {
   const [msg, setMsg] = useState("");
   const [err, setErr] = useState("");
 
+  const [operator, setOperator] = useState(() => {
+    try { return localStorage.getItem("operator") || ""; } catch { return ""; }
+  });
+
   async function refresh() {
     setLoading(true); setErr(""); setMsg("");
     try {
@@ -67,7 +72,7 @@ export default function App() {
         try { metaObj = JSON.parse(meta); }
         catch { throw new Error('Meta must be valid JSON, e.g. {"campaign":"diwali"}'); }
       }
-      await grantConsent({ subject_id: subjectId, data_use_case: dataUseCase, meta: metaObj });
+      await grantConsent({ subject_id: subjectId, data_use_case: dataUseCase, meta: metaObj }, operator);
       await refresh();
       setMsg("Consent granted successfully.");
     } catch (e) {
@@ -82,7 +87,7 @@ export default function App() {
     if (!ok) return;
     setLoading(true); setErr(""); setMsg("");
     try {
-      await revokeConsent(id);
+      await revokeConsent(id, operator);
       await refresh();
       setMsg("Consent revoked successfully.");
     } catch (e) {
@@ -118,13 +123,15 @@ export default function App() {
         Enterprise flow — Grant → List → Revoke → Audit Timeline
       </div>
 
+      <OperatorBar operator={operator} setOperator={setOperator} />
+
       <InlineMessage type="error" text={err} />
       <InlineMessage type="success" text={msg} />
 
       <form onSubmit={onGrant} style={{ display: "grid", gap: 10, marginBottom: 18, maxWidth: 760, background:"#fff", padding:12, border:"1px solid #eee", borderRadius:8 }}>
         <label style={label}>
           <span>Subject ID</span>
-          <input value={subjectId} onChange={(e) => setSubjectId(e.target.value)} required style={input} />
+          <input value={subjectId} onChange={(e) => { setSubjectId(e.target.value); setAudit([]); }} required style={input} />
         </label>
         <label style={label}>
           <span>Data Use Case</span>
