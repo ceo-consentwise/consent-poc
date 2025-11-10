@@ -5,6 +5,30 @@ function safeJson(v) {
   catch { return v; }
 }
 
+/** Convert timestamps to Indian Standard Time (Asia/Kolkata) */
+function fmtIST(iso) {
+  try {
+    if (!iso) return "";
+    // If no timezone info present, treat as UTC
+    let normalized = iso;
+    if (!/Z$|[+-]\d\d:\d\d$/.test(iso)) {
+      normalized = iso + "Z";
+    }
+    return new Date(normalized).toLocaleString("en-IN", {
+      timeZone: "Asia/Kolkata",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false
+    }).replace(",", "");
+  } catch {
+    return iso;
+  }
+}
+
 function timeAgo(iso) {
   try {
     const then = new Date(iso).getTime();
@@ -58,26 +82,27 @@ export default function AuditTimeline({ events }) {
       <div style={{ borderLeft: "3px solid #e3e3e3", paddingLeft: 16 }}>
         {events.map((ev, i) => {
           const details = safeJson(ev.details);
-          const ts = ev.timestamp ? new Date(ev.timestamp) : null;
-          const absolute = ts ? ts.toLocaleString() : "—";
           const relative = ev.timestamp ? timeAgo(ev.timestamp) : "";
+
           return (
             <div key={i} style={{ marginBottom: 18, position: "relative" }}>
+              {/* Left-side colored dot (T3) */}
               <Dot action={ev.action} />
 
+              {/* Action, timestamp (IST), relative */}
               <div style={{ display: "flex", gap: 8, alignItems: "baseline", flexWrap: "wrap" }}>
-                <div style={{ fontWeight: 600 }}>
-                  {absolute}
+                <div style={{ fontWeight: 700 }}>
+                  {String(ev.action || "").toUpperCase()}
+                </div>
+                <div style={{ color: "#222" }}>
+                  {fmtIST(ev.timestamp)} {/* <--- now in IST */}
                 </div>
                 <div style={{ fontSize: 12, color: "#666" }}>
-                  {relative && `· ${relative}`}
-                </div>
-                <div style={{ fontSize: 12, color: "#444", fontWeight: 600 }}>
-                  {String(ev.action || "").toUpperCase()}
+                  {relative && `(${relative})`}
                 </div>
               </div>
 
-              <div style={{ fontSize: 13, opacity: 0.8, marginTop: 2 }}>
+              <div style={{ fontSize: 13, opacity: 0.85, marginTop: 2 }}>
                 {ev.actor ? <>actor: <code>{ev.actor}</code></> : "actor: –"}
               </div>
 

@@ -15,6 +15,33 @@ import AuditTimeline from "./components/AuditTimeline";
 import StatusChip from "./components/StatusChip";
 import InlineMessage from "./components/InlineMessage";
 
+/** Display helper: render ISO -> IST (Asia/Kolkata), 24h, with seconds */
+/** Display helper: render ISO -> IST (Asia/Kolkata), 24h */
+function fmtIST(iso) {
+  try {
+    if (!iso) return "";
+
+    // If timestamp has no timezone (no Z or offset), treat it as UTC explicitly
+    let normalized = iso;
+    if (!/Z$|[+-]\d\d:\d\d$/.test(iso)) {
+      normalized = iso + "Z";
+    }
+
+    return new Date(normalized).toLocaleString("en-IN", {
+      timeZone: "Asia/Kolkata",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    }).replace(",", "");
+  } catch {
+    return iso;
+  }
+}
+
 function LoginPanel({ onLoggedIn }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -74,6 +101,9 @@ export default function App() {
   const [expStart, setExpStart] = useState(""); // YYYY-MM-DD
   const [expEnd, setExpEnd] = useState("");     // YYYY-MM-DD
 
+  // NEW (minimal): grant timestamp fallback per consent id
+  const [grantAtById, setGrantAtById] = useState({}); // { [consentId]: isoString }
+
   useEffect(() => { if (auth.loggedIn) refresh(); }, [auth.loggedIn]);
 
   async function refresh() {
@@ -82,6 +112,44 @@ export default function App() {
       const list = await listConsents(subjectId);
       setConsents(list);
       setMsg(`Loaded ${list.length} consents for "${subjectId}"`);
+
+      // --- Minimal fallback: if a consent lacks created_at, derive from its audit (first 'grant') ---
+      const needs = list
+        .filter(c => {
+          const createdRaw =
+            c.created_at ??
+            c.createdAt ??
+            c.created ??
+            c.timestamp ??
+            c.updated_at ??
+            c.updatedAt ??
+            null;
+          return !createdRaw && !(c.id in grantAtById);
+        })
+        .map(c => c.id);
+
+      if (needs.length) {
+        const entries = await Promise.all(needs.map(async (id) => {
+          try {
+            const events = await listAudit(id);
+            // find grant, else earliest
+            let chosen = null;
+            if (Array.isArray(events) && events.length) {
+              const grants = events.filter(e => String(e.action || "").toLowerCase().includes("grant"));
+              chosen = (grants[0] || events[0]) || null;
+            }
+            const t = chosen?.timestamp || chosen?.time || chosen?.created_at || null;
+            return [id, t];
+          } catch {
+            return [id, null];
+          }
+        }));
+        const merged = Object.fromEntries(entries.filter(([,v]) => !!v));
+        if (Object.keys(merged).length) {
+          setGrantAtById(prev => ({ ...prev, ...merged }));
+        }
+      }
+      // --- end fallback ---
     } catch (e) {
       setErr(String(e.message || e));
     } finally {
@@ -154,14 +222,23 @@ export default function App() {
     }
   }
 
+  function onResetExportFilters() {
+    setExpSubject("");
+    setExpStart("");
+    setExpEnd("");
+  }
+
+  function onResetSubject() {
+    setSubjectId("");
+    setAudit([]);
+    setConsents([]);
+    setMsg("Subject filter cleared. Click Refresh List to load all or set a subject.");
+  }
+
   function onLogout() {
     clearAuthState();
     setAuth({ username: "", loggedIn: false });
     setConsents([]); setAudit([]); setMsg(""); setErr("");
-  }
-
-  if (!auth.loggedIn) {
-    return <LoginPanel onLoggedIn={(next) => setAuth(next)} />;
   }
 
   // ---- Styles ----
@@ -170,6 +247,11 @@ export default function App() {
   const label = { display: "grid", gap: 4 };
   const input = { padding: 8, border: "1px solid #cfcfcf", borderRadius: 6 };
   const button = { padding: "8px 12px", borderRadius: 6, cursor: "pointer" };
+  const ghostBtn = { ...button, background: "#f6f7f8", border: "1px solid #e6e6e6" };
+
+  if (!auth.loggedIn) {
+    return <LoginPanel onLoggedIn={(next) => setAuth(next)} />;
+  }
 
   return (
     <div style={shell}>
@@ -189,10 +271,14 @@ export default function App() {
       <InlineMessage type="error" text={err} />
       <InlineMessage type="success" text={msg} />
 
-      {/* Grant form */}
+      {/* Grant form (includes Subject filter) */}
       <form onSubmit={onGrant} style={{ display: "grid", gap: 10, marginBottom: 18, maxWidth: 760, background:"#fff", padding:12, border:"1px solid #eee", borderRadius:8 }}>
         <label style={label}>
-          <span>Subject ID</span>
+          <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span>Subject ID</span>
+            {/* R1: quick reset adjacent to subject filter */}
+            <button type="button" onClick={onResetSubject} style={ghostBtn}>Reset</button>
+          </span>
           <input value={subjectId} onChange={(e) => { setSubjectId(e.target.value); setAudit([]); }} required style={input} />
         </label>
 
@@ -216,7 +302,7 @@ export default function App() {
       <div style={{ margin: "12px 0", padding: 12, background:"#fff", border:"1px solid #eee", borderRadius:8, maxWidth: 760 }}>
         <h3 style={{ marginTop: 0 }}>Export Consents (Server CSV)</h3>
         <div style={{ display: "grid", gap: 8 }}>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
             <input
               value={expSubject}
               onChange={(e)=>setExpSubject(e.target.value)}
@@ -240,6 +326,10 @@ export default function App() {
             <button onClick={onExportConsents} disabled={loading} style={button}>
               Download Consents CSV
             </button>
+            {/* R1: Reset Filters inline with date/subject controls */}
+            <button type="button" onClick={onResetExportFilters} style={ghostBtn}>
+              Reset Filters
+            </button>
           </div>
           <div style={{ color: "#666", fontSize: 12 }}>
             Tip: leave Subject blank to export all consents in the date range.
@@ -257,31 +347,46 @@ export default function App() {
               <th style={{ textAlign: "left", width: 180 }}>Subject</th>
               <th style={{ textAlign: "left", width: 220 }}>Data Use Case</th>
               <th style={{ textAlign: "left", width: 120 }}>Status</th>
+              <th style={{ textAlign: "left", width: 220 }}>Created At (IST)</th>
               <th style={{ textAlign: "left", width: 200 }}>Actions</th>
             </tr>
           </thead>
           <tbody>
             {consents.length > 0 ? (
-              consents.map((c) => (
-                <tr key={c.id}>
-                  <td title={c.id} style={{ maxWidth: 320, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {c.id}
-                  </td>
-                  <td>{c.subject_id}</td>
-                  <td>{c.data_use_case || c.purpose}</td>
-                  <td><StatusChip status={c.status} /></td>
-                  <td style={{ display: "flex", gap: 8 }}>
-                    <button onClick={() => onRevoke(c.id)} disabled={loading || c.status === "revoked"} style={button}>
-                      Revoke
-                    </button>
-                    <button onClick={() => onShowAudit(c.id)} disabled={loading} style={button}>
-                      Audit
-                    </button>
-                  </td>
-                </tr>
-              ))
+              consents.map((c) => {
+                // Prefer consent's own created time; else fallback to derived grant timestamp
+                const createdRaw =
+                  c.created_at ??
+                  c.createdAt ??
+                  c.created ??
+                  c.timestamp ??
+                  c.updated_at ??
+                  c.updatedAt ??
+                  grantAtById[c.id] ??
+                  null;
+
+                return (
+                  <tr key={c.id}>
+                    <td title={c.id} style={{ maxWidth: 320, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {c.id}
+                    </td>
+                    <td>{c.subject_id}</td>
+                    <td>{c.data_use_case || c.purpose}</td>
+                    <td><StatusChip status={c.status} /></td>
+                    <td>{createdRaw ? fmtIST(createdRaw) : "—"}</td>
+                    <td style={{ display: "flex", gap: 8 }}>
+                      <button onClick={() => onRevoke(c.id)} disabled={loading || String(c.status).toLowerCase() === "revoked"} style={button}>
+                        Revoke
+                      </button>
+                      <button onClick={() => onShowAudit(c.id)} disabled={loading} style={button}>
+                        Audit
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })
             ) : (
-              <tr><td colSpan="5" style={{ textAlign: "center", padding: 12, color: "#777" }}>No consents yet</td></tr>
+              <tr><td colSpan="6" style={{ textAlign: "center", padding: 12, color: "#777" }}>No consents yet</td></tr>
             )}
           </tbody>
         </table>
