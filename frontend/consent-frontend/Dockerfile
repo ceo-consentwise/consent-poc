@@ -1,14 +1,20 @@
-# Build stage
-FROM node:20.19.0-alpine AS build
-WORKDIR /usr/src/app
-COPY package.json package-lock.json* pnpm-lock.yaml* yarn.lock* ./
-RUN npm ci || npm install
-COPY . .
-RUN npm run build
+# frontend/consent-frontend/Dockerfile
 
-# Serve built assets with Vite preview (you can swap to nginx later)
-FROM node:20.19.0-alpine AS run
-WORKDIR /usr/src/app
-COPY --from=build /usr/src/app/dist ./dist
-EXPOSE 5173
-CMD ["npx","vite","preview","--host","0.0.0.0","--port","5173"]
+# Build stage
+FROM node:20 AS build
+WORKDIR /app
+COPY . .
+RUN npm install
+RUN npm run build   # outputs to /app/dist
+
+# Run stage
+FROM nginx:alpine
+COPY --from=build /app/dist /usr/share/nginx/html
+
+# Optional: remove default nginx port message
+RUN rm /etc/nginx/conf.d/default.conf
+
+# Add simple config to serve SPA routing
+COPY ./nginx.conf /etc/nginx/conf.d/default.conf
+
+EXPOSE 80
