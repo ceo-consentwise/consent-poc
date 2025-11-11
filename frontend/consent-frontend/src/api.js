@@ -1,24 +1,17 @@
 // frontend/consent-frontend/src/api.js
 
-/**
- * Base URL resolution (prod-friendly):
- * - Prefer Vite env var VITE_API_BASE (set this in your frontend deploy)
- * - Fallback to window.__API_BASE__ if you want to override at runtime
- * - Finally fallback to same-origin /api/v1 (useful for local reverse proxy)
- *
- * Examples:
- *   VITE_API_BASE=https://consent-poc.onrender.com/api/v1
+/** Resolve API base:
+ * - In Render: set VITE_API_BASE to "https://consent-poc.onrender.com/api/v1"
+ * - In local dev: falls back to http://127.0.0.1:8000/api/v1
  */
-const RAW_BASE =
-  (typeof import !== "undefined" && typeof import.meta !== "undefined" && import.meta.env && import.meta.env.VITE_API_BASE) ||
-  (typeof window !== "undefined" && window.__API_BASE__) ||
-  `${location.origin}/api/v1`;
-
-const BASE = String(RAW_BASE).replace(/\/+$/, ""); // trim trailing slash
+const ENV = (typeof import.meta !== "undefined" && import.meta.env) ? import.meta.env : {};
+const BASE =
+  (ENV.VITE_API_BASE && ENV.VITE_API_BASE.trim()) ||
+  "http://127.0.0.1:8000/api/v1";
 
 /**
  * ---- Auth (simple, client-side only) ----
- * Tiny localStorage-based auth so the existing "simple login" works.
+ * We keep a tiny localStorage-based auth so your existing "simple login" works.
  * No headers are sent to the backend (keeps backend unchanged).
  */
 const AUTH_KEY = "simple_auth"; // { username: "user", loggedIn: true }
@@ -86,18 +79,14 @@ export async function listAudit(consent_id) {
   return res.json();
 }
 
-/**
- * Server-side CSV export (Consents)
- * Ex: subject_id, start_date, end_date (YYYY-MM-DD)
- */
+/** Server-side CSV export for consents */
 export async function exportConsentsCSV({ subject_id, start_date, end_date }) {
   const params = new URLSearchParams();
   if (subject_id) params.set("subject_id", subject_id);
   if (start_date) params.set("start_date", start_date);
   if (end_date) params.set("end_date", end_date);
 
-  const url = `${BASE}/consents/export.csv${params.toString() ? `?${params.toString()}` : ""}`;
-  const res = await fetch(url);
+  const res = await fetch(`${BASE}/consents/export.csv?` + params.toString());
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new Error(`Export failed: ${res.status} ${text}`);
