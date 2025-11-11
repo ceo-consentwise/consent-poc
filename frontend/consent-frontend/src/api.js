@@ -1,13 +1,25 @@
 // frontend/consent-frontend/src/api.js
 
-/** Resolve API base:
- * - In Render: set VITE_API_BASE to "https://consent-poc.onrender.com/api/v1"
- * - In local dev: falls back to http://127.0.0.1:8000/api/v1
- */
-const ENV = (typeof import.meta !== "undefined" && import.meta.env) ? import.meta.env : {};
-const BASE =
-  (ENV.VITE_API_BASE && ENV.VITE_API_BASE.trim()) ||
-  "http://127.0.0.1:8000/api/v1";
+// --- Base URL selection (robust for dev + Render) ---
+const DEV_BASE = "http://127.0.0.1:8000/api/v1";
+const PROD_BASE = "https://consent-poc.onrender.com/api/v1";
+
+// Prefer an env var if you set one in your hosting (Render, Netlify, etc.)
+let BASE = DEV_BASE;
+try {
+  const hasVite = typeof import.meta !== "undefined" && import.meta.env;
+  if (hasVite && import.meta.env.VITE_API_BASE) {
+    BASE = import.meta.env.VITE_API_BASE;
+  } else if (
+    typeof window !== "undefined" &&
+    (window.location.hostname.endsWith("onrender.com") ||
+     window.location.hostname.endsWith("onrenderapp.com"))
+  ) {
+    BASE = PROD_BASE;
+  }
+} catch {
+  // fall back to DEV_BASE
+}
 
 /**
  * ---- Auth (simple, client-side only) ----
@@ -38,7 +50,7 @@ export function clearAuthState() {
  * ---- Consents/Audit API ----
  */
 export async function grantConsent({ subject_id, data_use_case, meta }) {
-  // We send both `data_use_case` and legacy `purpose` to remain compatible
+  // Send both fields to remain compatible with backend that mirrors data_use_case/purpose
   const body = { subject_id, data_use_case, purpose: data_use_case, meta };
   const res = await fetch(`${BASE}/consents`, {
     method: "POST",
@@ -79,14 +91,14 @@ export async function listAudit(consent_id) {
   return res.json();
 }
 
-/** Server-side CSV export for consents */
+// Server-side CSV export (Consents)
 export async function exportConsentsCSV({ subject_id, start_date, end_date }) {
   const params = new URLSearchParams();
   if (subject_id) params.set("subject_id", subject_id);
   if (start_date) params.set("start_date", start_date);
   if (end_date) params.set("end_date", end_date);
 
-  const res = await fetch(`${BASE}/consents/export.csv?` + params.toString());
+  const res = await fetch(`${BASE}/consents/export.csv?${params.toString()}`);
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new Error(`Export failed: ${res.status} ${text}`);
@@ -102,3 +114,5 @@ export async function exportConsentsCSV({ subject_id, start_date, end_date }) {
   a.remove();
   URL.revokeObjectURL(downloadUrl);
 }
+
+export { BASE }; // (optional) useful for debugging in UI
