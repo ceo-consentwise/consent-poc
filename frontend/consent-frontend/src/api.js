@@ -1,26 +1,26 @@
 // frontend/consent-frontend/src/api.js
 
-// --- Base URL resolution (minimal + robust) ---
-// Priority:
-// 1) VITE_API_BASE (e.g. https://consent-poc.onrender.com)
-// 2) If running on localhost, default to local FastAPI
-// 3) Otherwise, fall back to same-origin (useful when front+back are under one domain)
-const fromEnv = (typeof import.meta !== "undefined" && import.meta.env && import.meta.env.VITE_API_BASE) || "";
-const envBase = fromEnv.replace(/\/+$/, ""); // trim trailing slash
+/**
+ * Base URL resolution (prod-friendly):
+ * - Prefer Vite env var VITE_API_BASE (set this in your frontend deploy)
+ * - Fallback to window.__API_BASE__ if you want to override at runtime
+ * - Finally fallback to same-origin /api/v1 (useful for local reverse proxy)
+ *
+ * Examples:
+ *   VITE_API_BASE=https://consent-poc.onrender.com/api/v1
+ */
+const RAW_BASE =
+  (typeof import !== "undefined" && typeof import.meta !== "undefined" && import.meta.env && import.meta.env.VITE_API_BASE) ||
+  (typeof window !== "undefined" && window.__API_BASE__) ||
+  `${location.origin}/api/v1`;
 
-const isLocal =
-  typeof window !== "undefined" &&
-  (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1");
+const BASE = String(RAW_BASE).replace(/\/+$/, ""); // trim trailing slash
 
-const originBase =
-  typeof window !== "undefined" ? window.location.origin.replace(/\/+$/, "") : "";
-
-const DEFAULT_HTTP_BASE = envBase || (isLocal ? "http://127.0.0.1:8000" : originBase);
-
-// Final API base including the /api/v1 prefix
-const BASE = `${DEFAULT_HTTP_BASE}/api/v1`;
-
-// ---- Auth (simple, client-side only) ----
+/**
+ * ---- Auth (simple, client-side only) ----
+ * Tiny localStorage-based auth so the existing "simple login" works.
+ * No headers are sent to the backend (keeps backend unchanged).
+ */
 const AUTH_KEY = "simple_auth"; // { username: "user", loggedIn: true }
 
 export function getAuthState() {
@@ -41,62 +41,63 @@ export function clearAuthState() {
   try { localStorage.removeItem(AUTH_KEY); } catch {}
 }
 
-// ---- Small fetch helpers ----
-async function getJSON(url) {
-  const res = await fetch(url, { credentials: "omit" });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`${res.status} ${text || res.statusText}`);
-  }
-  return res.json();
-}
-
-async function sendJSON(url, method, bodyObj) {
-  const res = await fetch(url, {
-    method,
+/**
+ * ---- Consents/Audit API ----
+ */
+export async function grantConsent({ subject_id, data_use_case, meta }) {
+  // We send both `data_use_case` and legacy `purpose` to remain compatible
+  const body = { subject_id, data_use_case, purpose: data_use_case, meta };
+  const res = await fetch(`${BASE}/consents`, {
+    method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: bodyObj != null ? JSON.stringify(bodyObj) : undefined,
-    credentials: "omit",
+    body: JSON.stringify(body),
   });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(`${res.status} ${text || res.statusText}`);
+    throw new Error(`Grant failed: ${res.status} ${text}`);
   }
   return res.json();
-}
-
-// ---- Consents/Audit API (keeps existing signatures) ----
-export async function grantConsent({ subject_id, data_use_case, meta }) {
-  // send both data_use_case and purpose (backward-compat with Day 7)
-  const body = { subject_id, data_use_case, purpose: data_use_case, meta };
-  return sendJSON(`${BASE}/consents`, "POST", body);
 }
 
 export async function listConsents(subject_id) {
   const url = subject_id
     ? `${BASE}/consents?subject_id=${encodeURIComponent(subject_id)}`
     : `${BASE}/consents`;
-  return getJSON(url);
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`List failed: ${res.status}`);
+  return res.json();
 }
 
 export async function revokeConsent(id) {
-  return sendJSON(`${BASE}/consents/${encodeURIComponent(id)}/revoke`, "PATCH");
+  const res = await fetch(`${BASE}/consents/${id}/revoke`, { method: "PATCH" });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Revoke failed: ${res.status} ${text}`);
+  }
+  return res.json();
 }
 
 export async function listAudit(consent_id) {
   const url = consent_id
     ? `${BASE}/audit?consent_id=${encodeURIComponent(consent_id)}`
     : `${BASE}/audit`;
-  return getJSON(url);
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Audit list failed: ${res.status}`);
+  return res.json();
 }
 
+/**
+ * Server-side CSV export (Consents)
+ * Ex: subject_id, start_date, end_date (YYYY-MM-DD)
+ */
 export async function exportConsentsCSV({ subject_id, start_date, end_date }) {
   const params = new URLSearchParams();
   if (subject_id) params.set("subject_id", subject_id);
   if (start_date) params.set("start_date", start_date);
   if (end_date) params.set("end_date", end_date);
 
-  const res = await fetch(`${BASE}/consents/export.csv?${params.toString()}`);
+  const url = `${BASE}/consents/export.csv${params.toString() ? `?${params.toString()}` : ""}`;
+  const res = await fetch(url);
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new Error(`Export failed: ${res.status} ${text}`);
@@ -112,6 +113,3 @@ export async function exportConsentsCSV({ subject_id, start_date, end_date }) {
   a.remove();
   URL.revokeObjectURL(downloadUrl);
 }
-
-// Optional: quick sanity check you can call from the UI console
-export function __debug_api_base() { return { BASE, DEFAULT_HTTP_BASE, envBase }; }
