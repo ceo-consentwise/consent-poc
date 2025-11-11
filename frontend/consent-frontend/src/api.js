@@ -2,59 +2,62 @@
 
 /**
  * Minimal, deployment-safe API client:
- * - Local dev default: http://127.0.0.1:8000
- * - Same-origin prod (behind a reverse proxy): window.origin
- * - Optional runtime override (no /api/v1 in the value):
- *     localStorage.setItem("api_base_override", "https://consent-poc.onrender.com")
- *
- * This module guarantees "/api/v1" is appended **exactly once**.
+ * - Local dev default: http://127.0.0.1:8000/api/v1/
+ * - In prod/same-origin (behind reverse proxy): /api/v1/
+ * - Optional runtime override: localStorage.setItem("api_base_override", "<url>")
+ * - Optional build-time override: VITE_API_BASE
  */
 
-// ---------- BASE resolution ----------
-const AUTH_KEY = "simple_auth";            // { username: "user", loggedIn: true }
-const BASE_OVERRIDE_KEY = "api_base_override";
-const API_SUFFIX = "/api/v1";
+// ---- BASE resolution ----
+const LOCAL_BASE = "http://127.0.0.1:8000/api/v1/";
+const RELATIVE_BASE = "/api/v1/";
+const BASE_KEY = "api_base_override";
 
-/** remove trailing slashes and any trailing /api/v1 */
-function normalizeOrigin(u) {
-  if (!u) return "";
+function resolveBase() {
+  // 1) localStorage override (highest priority)
   try {
-    // if full URL, use origin (protocol+host+port)
-    const url = new URL(u, window.location.origin);
-    u = url.origin + url.pathname; // keeps potential path (for custom proxies)
-  } catch {
-    // plain string (e.g., "http://127.0.0.1:8000" or "/backend")
-  }
-  // strip trailing slashes
-  while (u.endsWith("/")) u = u.slice(0, -1);
-  // remove a trailing /api/v1 if present
-  if (u.toLowerCase().endsWith(API_SUFFIX)) {
-    u = u.slice(0, -API_SUFFIX.length);
-  }
-  return u;
+    const ls = localStorage.getItem(BASE_KEY);
+    if (ls && typeof ls === "string" && ls.trim()) {
+      return normalizeBase(ls);
+    }
+  } catch {}
+
+  // 2) Vite env (build-time)
+  try {
+    const env = (import.meta && import.meta.env && import.meta.env.VITE_API_BASE) || "";
+    if (env && typeof env === "string" && env.trim()) {
+      return normalizeBase(env);
+    }
+  } catch {}
+
+  // 3) Heuristic: if running locally, use local base; otherwise use relative
+  const host = (typeof location !== "undefined" && location.hostname) || "";
+  const isLocal =
+    host === "localhost" ||
+    host === "127.0.0.1" ||
+    host.startsWith("192.168.") ||
+    host.endsWith(".local");
+  return normalizeBase(isLocal ? LOCAL_BASE : RELATIVE_BASE);
 }
 
-function resolveApiBase() {
-  // 1) Explicit override
-  const override = localStorage.getItem(BASE_OVERRIDE_KEY);
-  if (override) {
-    return normalizeOrigin(override) + API_SUFFIX;
-  }
-
-  // 2) Local dev heuristics
-  const host = (typeof window !== "undefined" ? window.location.hostname : "localhost") || "localhost";
-  if (host === "localhost" || host === "127.0.0.1") {
-    return "http://127.0.0.1:8000" + API_SUFFIX;
-  }
-
-  // 3) Same-origin by default (Render reverse proxy case)
-  const origin = typeof window !== "undefined" ? window.location.origin : "";
-  return normalizeOrigin(origin) + API_SUFFIX;
+function normalizeBase(u) {
+  // ensure exactly one trailing slash
+  const trimmed = String(u).trim();
+  return trimmed.endsWith("/") ? trimmed : trimmed + "/";
 }
 
-const BASE = resolveApiBase(); // e.g., "http://127.0.0.1:8000/api/v1" or "https://consent-poc.onrender.com/api/v1"
+// Build final BASE once
+const BASE = resolveBase();
 
-// ---------- Auth (client-side only, unchanged) ----------
+/** Join base + path safely (avoids double /api/v1 etc.) */
+function api(path) {
+  const p = String(path || "").replace(/^\/+/, ""); // strip leading slashes from path
+  return new URL(p, BASE).toString();
+}
+
+/** ---------- Simple client-side auth (unchanged) ---------- */
+const AUTH_KEY = "simple_auth"; // { username: "user", loggedIn: true }
+
 export function getAuthState() {
   try {
     const raw = localStorage.getItem(AUTH_KEY);
@@ -73,21 +76,23 @@ export function clearAuthState() {
   try { localStorage.removeItem(AUTH_KEY); } catch {}
 }
 
-// ---------- Fetch helper ----------
+/** ---------- Fetch helper for clearer errors ---------- */
 async function doFetch(url, init) {
   const res = await fetch(url, init);
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(`${init?.method || "GET"} ${url} -> ${res.status} ${text}`);
+    const snippet = text ? ` ${text}` : "";
+    throw new Error(`${init?.method || "GET"} ${url} failed: ${res.status}${snippet}`);
   }
   return res;
 }
 
-// ---------- API: Consents & Audit ----------
+/** ---------- Consents & Audit API (kept compatible) ---------- */
+
 export async function grantConsent({ subject_id, data_use_case, meta }) {
-  // Send both `data_use_case` and `purpose` to remain compatible with Day 7 backend.
+  // Send both `data_use_case` and legacy `purpose` for compatibility
   const body = { subject_id, data_use_case, purpose: data_use_case, meta };
-  const res = await doFetch(`${BASE}/consents`, {
+  const res = await doFetch(api("consents"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -97,14 +102,14 @@ export async function grantConsent({ subject_id, data_use_case, meta }) {
 
 export async function listConsents(subject_id) {
   const url = subject_id
-    ? `${BASE}/consents?subject_id=${encodeURIComponent(subject_id)}`
-    : `${BASE}/consents`;
+    ? api(`consents?subject_id=${encodeURIComponent(subject_id)}`)
+    : api("consents");
   const res = await doFetch(url);
   return res.json();
 }
 
 export async function revokeConsent(id) {
-  const res = await doFetch(`${BASE}/consents/${encodeURIComponent(id)}/revoke`, {
+  const res = await doFetch(api(`consents/${encodeURIComponent(id)}/revoke`), {
     method: "PATCH",
   });
   return res.json();
@@ -112,22 +117,23 @@ export async function revokeConsent(id) {
 
 export async function listAudit(consent_id) {
   const url = consent_id
-    ? `${BASE}/audit?consent_id=${encodeURIComponent(consent_id)}`
-    : `${BASE}/audit`;
+    ? api(`audit?consent_id=${encodeURIComponent(consent_id)}`)
+    : api("audit");
   const res = await doFetch(url);
   return res.json();
 }
 
+/** Server-side CSV export (Consents) */
 export async function exportConsentsCSV({ subject_id, start_date, end_date } = {}) {
-  const params = new URLSearchParams();
-  if (subject_id) params.set("subject_id", subject_id);
-  if (start_date) params.set("start_date", start_date);
-  if (end_date) params.set("end_date", end_date);
+  const q = new URLSearchParams();
+  if (subject_id) q.set("subject_id", subject_id);
+  if (start_date) q.set("start_date", start_date);
+  if (end_date) q.set("end_date", end_date);
 
-  const url = `${BASE}/consents/export.csv${params.toString() ? `?${params}` : ""}`;
-  const res = await doFetch(url, { method: "GET" });
-
+  const url = api(`consents/export.csv${q.toString() ? `?${q.toString()}` : ""}`);
+  const res = await doFetch(url);
   const blob = await res.blob();
+
   const a = document.createElement("a");
   const downloadUrl = URL.createObjectURL(blob);
   a.href = downloadUrl;
@@ -138,14 +144,22 @@ export async function exportConsentsCSV({ subject_id, start_date, end_date } = {
   URL.revokeObjectURL(downloadUrl);
 }
 
-// ---- Utilities to help during deploy/debug (optional) ----
-export function getResolvedBase() { return BASE; }           // for quick console checks
-export function setApiBaseOverride(url) {                    // call from console if needed
-  localStorage.setItem(BASE_OVERRIDE_KEY, url || "");
-  // reload to take effect
-  if (typeof window !== "undefined") window.location.reload();
+/** (Optional) If you later want server CSV for audit, you can add:
+export async function exportAuditCSV({ consent_id, start_date, end_date } = {}) {
+  const q = new URLSearchParams();
+  if (consent_id) q.set("consent_id", consent_id);
+  if (start_date) q.set("start_date", start_date);
+  if (end_date) q.set("end_date", end_date);
+  const url = api(\`audit/export.csv\${q.toString() ? \`?\${q.toString()}\` : ""}\`);
+  const res = await doFetch(url);
+  const blob = await res.blob();
+  const a = document.createElement("a");
+  const downloadUrl = URL.createObjectURL(blob);
+  a.href = downloadUrl;
+  a.download = "audit_export.csv";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(downloadUrl);
 }
-export function clearApiBaseOverride() {
-  localStorage.removeItem(BASE_OVERRIDE_KEY);
-  if (typeof window !== "undefined") window.location.reload();
-}
+*/
