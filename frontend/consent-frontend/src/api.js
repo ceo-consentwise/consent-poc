@@ -1,61 +1,19 @@
 // frontend/consent-frontend/src/api.js
 
-/**
- * Base resolution:
- * - In dev: defaults to http://127.0.0.1:8000
- * - In prod: defaults to window.location.origin (e.g., Render backend URL if same origin)
- * - Override with VITE_API_BASE or window.__API_BASE__ (no trailing /)
- *
- * This file GUARANTEES we append the API prefix exactly once.
- */
+// ---------- Base URL handling (fixes double /api/v1 and 404s) ----------
+const LOCAL_DEFAULT = "http://127.0.0.1:8000"; // host only, no /api/v1
 
-const API_PREFIX = "/api/v1";
+// Read from Vite env if available; fallback to local
+const ENV_BASE =
+  (typeof import.meta !== "undefined" &&
+   import.meta.env &&
+   import.meta.env.VITE_API_BASE) || LOCAL_DEFAULT;
 
-// Pick a starting base
-const RAW_BASE =
-  (typeof import !== "undefined" &&
-    typeof import.meta !== "undefined" &&
-    import.meta.env &&
-    import.meta.env.VITE_API_BASE) ||
-  (typeof window !== "undefined" && window.__API_BASE__) ||
-  (typeof window !== "undefined" && window.location && !window.location.hostname.includes("localhost")
-    ? window.location.origin
-    : "http://127.0.0.1:8000");
+// Ensure no trailing slash, then append /api/v1 exactly once
+const API_BASE = String(ENV_BASE).replace(/\/+$/, "");
+const BASE = `${API_BASE}/api/v1`;
 
-// Normalize a base by removing trailing slashes and any duplicated api prefix
-function normalizeBase(base) {
-  if (!base) return "";
-  let b = String(base).trim();
-
-  // drop trailing slashes
-  while (b.endsWith("/")) b = b.slice(0, -1);
-
-  // If someone put /api or /api/v1 in the base, strip it to avoid double-prefix
-  const stripOnce = (s, suffix) =>
-    s.toLowerCase().endsWith(suffix) ? s.slice(0, s.length - suffix.length) : s;
-
-  b = stripOnce(b, "/api/v1");
-  b = stripOnce(b, "/api");
-
-  // drop trailing slash again if any
-  while (b.endsWith("/")) b = b.slice(0, -1);
-
-  return b;
-}
-
-const BASE_ROOT = normalizeBase(RAW_BASE);
-
-// Join helper that guarantees a single prefix occurrence
-function endpoint(path) {
-  // path must start with '/'
-  const p = path.startsWith("/") ? path : `/${path}`;
-  return `${BASE_ROOT}${API_PREFIX}${p}`;
-}
-
-/**
- * ---- Auth (simple, client-side only) ----
- * We keep a tiny localStorage-based auth so your existing "simple login" works.
- */
+// ---------- Simple client-side auth (unchanged) ----------
 const AUTH_KEY = "simple_auth"; // { username: "user", loggedIn: true }
 
 export function getAuthState() {
@@ -68,25 +26,19 @@ export function getAuthState() {
 }
 
 export function setAuthState(next) {
-  try {
-    localStorage.setItem(AUTH_KEY, JSON.stringify(next));
-  } catch {}
+  try { localStorage.setItem(AUTH_KEY, JSON.stringify(next)); } catch {}
   return next;
 }
 
 export function clearAuthState() {
-  try {
-    localStorage.removeItem(AUTH_KEY);
-  } catch {}
+  try { localStorage.removeItem(AUTH_KEY); } catch {}
 }
 
-/**
- * ---- Consents/Audit API ----
- */
+// ---------- API helpers (preserve existing features) ----------
 export async function grantConsent({ subject_id, data_use_case, meta }) {
-  // Send both data_use_case and purpose for compatibility
+  // Send both `data_use_case` and `purpose` (compat with backend mapping)
   const body = { subject_id, data_use_case, purpose: data_use_case, meta };
-  const res = await fetch(endpoint("/consents"), {
+  const res = await fetch(`${BASE}/consents`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -100,15 +52,15 @@ export async function grantConsent({ subject_id, data_use_case, meta }) {
 
 export async function listConsents(subject_id) {
   const url = subject_id
-    ? `${endpoint("/consents")}?subject_id=${encodeURIComponent(subject_id)}`
-    : endpoint("/consents");
+    ? `${BASE}/consents?subject_id=${encodeURIComponent(subject_id)}`
+    : `${BASE}/consents`;
   const res = await fetch(url);
   if (!res.ok) throw new Error(`List failed: ${res.status}`);
   return res.json();
 }
 
 export async function revokeConsent(id) {
-  const res = await fetch(endpoint(`/consents/${id}/revoke`), { method: "PATCH" });
+  const res = await fetch(`${BASE}/consents/${id}/revoke`, { method: "PATCH" });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new Error(`Revoke failed: ${res.status} ${text}`);
@@ -118,24 +70,23 @@ export async function revokeConsent(id) {
 
 export async function listAudit(consent_id) {
   const url = consent_id
-    ? `${endpoint("/audit")}?consent_id=${encodeURIComponent(consent_id)}`
-    : endpoint("/audit");
+    ? `${BASE}/audit?consent_id=${encodeURIComponent(consent_id)}`
+    : `${BASE}/audit`;
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Audit list failed: ${res.status}`);
   return res.json();
 }
 
 export async function exportConsentsCSV({ subject_id, start_date, end_date }) {
+  // GET /consents/export.csv?subject_id=&start_date=&end_date=
   const params = new URLSearchParams();
   if (subject_id) params.set("subject_id", subject_id);
   if (start_date) params.set("start_date", start_date);
   if (end_date) params.set("end_date", end_date);
 
-  const url = `${endpoint("/consents/export.csv")}${
-    params.toString() ? `?${params.toString()}` : ""
-  }`;
-
+  const url = `${BASE}/consents/export.csv${params.toString() ? `?${params}` : ""}`;
   const res = await fetch(url);
+
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new Error(`Export failed: ${res.status} ${text}`);
@@ -151,6 +102,3 @@ export async function exportConsentsCSV({ subject_id, start_date, end_date }) {
   a.remove();
   URL.revokeObjectURL(downloadUrl);
 }
-
-// Expose the resolved base for quick debugging if needed
-export const __API_DEBUG__ = { RAW_BASE, BASE_ROOT, API_PREFIX, endpoint: (p) => endpoint(p) };
