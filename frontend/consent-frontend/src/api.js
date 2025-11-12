@@ -1,80 +1,35 @@
 // frontend/consent-frontend/src/api.js
 
-/**
- * Minimal, deployment-safe API client for the Consent PoC.
- *
- * Goals:
- * - Avoid double prefixes like /api/v1/api/v1
- * - Work locally AND on Render with separate frontend/backend domains
- * - Keep existing simple login (no JWT/OAuth) intact
- * - Be tolerant to Day7 vs Day8 endpoint shapes (grant/revoke)
- */
-
-// ====== BASE resolution ======
+// ===== Base URL resolution (works locally, same-origin, or cross-domain) =====
 const LOCAL_BASE = "http://127.0.0.1:8000/api/v1";
-const RELATIVE_BASE = "/api/v1"; // used only when frontend & backend are same-origin
-const RENDER_BACKEND_BASE = "https://consent-poc.onrender.com/api/v1"; // <-- your backend
-const BASE_KEY = "api_base_override"; // optional override via localStorage
-
-function trimSlashes(s) {
-  return String(s).replace(/\/+$/, "");
-}
+const RELATIVE_BASE = "/api/v1";
+const BASE_KEY = "api_base_override";
 
 /**
- * Decide which base URL to use:
- * 1) If localStorage override is set, use it (allows hot fixes without redeploy)
- * 2) If we're on your Render frontend host, use the Render backend domain
- * 3) If running on localhost, use local FastAPI
- * 4) Fallback to relative base (for same-origin setups)
+ * Choose the API base:
+ * 1) If localStorage has "api_base_override" use that (e.g. https://consent-poc.onrender.com/api/v1)
+ * 2) If running on localhost/127.0.0.1, use LOCAL_BASE
+ * 3) Otherwise, assume same-origin path /api/v1 (behind a reverse proxy)
  */
 function resolveBase() {
   try {
     const override = localStorage.getItem(BASE_KEY);
     if (override && override.trim()) {
-      return trimSlashes(override.trim());
+      return stripTrailingSlash(override.trim());
     }
   } catch {}
-
-  const host =
-    typeof window !== "undefined" && window.location
-      ? window.location.hostname
-      : "";
-
-  const isLocal =
-    host === "localhost" || host === "127.0.0.1" || host === "0.0.0.0";
-  if (isLocal) return LOCAL_BASE;
-
-  // Your Render FE host -> use the Render BE domain
-  if (host.includes("consent-poc-1.onrender.com")) {
-    return RENDER_BACKEND_BASE;
-  }
-
-  // Same-origin fallback (behind reverse proxy mapping /api/v1 -> backend)
-  return RELATIVE_BASE;
+  const host = (typeof window !== "undefined" && window.location && window.location.hostname) ? window.location.hostname : "";
+  const isLocal = host === "localhost" || host === "127.0.0.1";
+  return isLocal ? LOCAL_BASE : RELATIVE_BASE;
 }
 
-const BASE = resolveBase();
-
-/** Build final URL safely: no duplicate /api/v1 and no double slashes */
-function buildUrl(path, query) {
-  const base = trimSlashes(BASE);
-  const cleanPath = String(path || "").replace(/^\/+/, ""); // remove leading /
-  let url = `${base}/${cleanPath}`;
-
-  if (query && typeof query === "object") {
-    const qs = new URLSearchParams();
-    Object.entries(query).forEach(([k, v]) => {
-      if (v !== undefined && v !== null && String(v).length) {
-        qs.append(k, String(v));
-      }
-    });
-    const qstr = qs.toString();
-    if (qstr) url += `?${qstr}`;
-  }
-  return url;
+function stripTrailingSlash(s) {
+  return s.replace(/\/+$/, "");
 }
 
-// ====== Simple client-side "auth" (unchanged logic) ======
+const BASE = resolveBase(); // e.g. "https://consent-poc.onrender.com/api/v1" or "/api/v1"
+
+// ===== Tiny auth helper (client-side only; your PoC login) =====
 const AUTH_KEY = "simple_auth"; // { username: "user", loggedIn: true }
 
 export function getAuthState() {
@@ -87,121 +42,128 @@ export function getAuthState() {
 }
 
 export function setAuthState(next) {
-  try {
-    localStorage.setItem(AUTH_KEY, JSON.stringify(next));
-  } catch {}
+  try { localStorage.setItem(AUTH_KEY, JSON.stringify(next)); } catch {}
   return next;
 }
 
 export function clearAuthState() {
-  try {
-    localStorage.removeItem(AUTH_KEY);
-  } catch {}
+  try { localStorage.removeItem(AUTH_KEY); } catch {}
 }
 
-// ====== Fetch helper ======
+// ===== Fetch helper (uniform errors) =====
 async function doFetch(url, init) {
   const res = await fetch(url, init);
   if (!res.ok) {
-    let text = "";
-    try {
-      text = await res.text();
-    } catch {}
-    const msg = text || res.statusText || "Request failed";
-    const e = new Error(`${res.status} ${msg}`);
-    e.status = res.status;
-    e.body = text;
-    throw e;
+    let msg = "";
+    try { msg = await res.text(); } catch {}
+    throw new Error(`${init?.method || "GET"} ${url} → ${res.status} ${msg || res.statusText}`);
   }
-  const ctype = res.headers.get("content-type") || "";
-  if (ctype.includes("application/json")) return res.json();
   return res;
 }
 
-// ====== API: Consents / Audit ======
+function jsonHeaders() {
+  return { "Content-Type": "application/json" };
+}
+
+// ===== Consents & Audit API (with fallbacks to support both endpoint shapes) =====
 
 /**
- * Grant consent
- * Body: { subject_id, data_use_case, meta? }
- * We also send purpose=data_use_case for Day7 compatibility.
- * Try POST /consents first (Day8+), then fallback to POST /consents/grant (Day7).
+ * Grant consent.
+ * Primary:   POST /api/v1/consents                      (Shape A)
+ * Fallback:  POST /api/v1/consents/grant                (Shape B / older)
  */
 export async function grantConsent({ subject_id, data_use_case, meta }) {
-  const body = {
+  const body = JSON.stringify({
     subject_id,
     data_use_case,
+    // keep compatibility for servers that still look at "purpose"
     purpose: data_use_case,
     meta,
-  };
+  });
 
-  // Try new shape: POST /consents
+  // Try Shape A
   try {
-    return await doFetch(buildUrl("consents"), {
+    const res = await doFetch(`${BASE}/consents`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      headers: jsonHeaders(),
+      body,
     });
+    return res.json();
   } catch (e) {
-    // Fallback to Day7: POST /consents/grant
-    if (e.status === 404 || e.status === 405) {
-      return await doFetch(buildUrl("consents/grant"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-    }
-    throw e;
+    // Only fall back on 404/405 (route missing or method mismatch)
+    if (!/ 404 | 405 /.test(" " + String(e.message) + " ")) throw e;
   }
+
+  // Fallback Shape B
+  const res2 = await doFetch(`${BASE}/consents/grant`, {
+    method: "POST",
+    headers: jsonHeaders(),
+    body,
+  });
+  return res2.json();
 }
 
 /**
- * List consents
- * Optional filter: subject_id
- */
-export async function listConsents(subject_id) {
-  const url = buildUrl("consents", subject_id ? { subject_id } : undefined);
-  return await doFetch(url, { method: "GET" });
-}
-
-/**
- * Revoke consent
- * Try PATCH /consents/{id}/revoke (Day8+), fallback to POST /consents/{id}/revoke (Day7).
+ * Revoke consent.
+ * Primary:   PATCH /api/v1/consents/{id}/revoke         (Shape A)
+ * Fallback:  POST  /api/v1/consents/{id}/revoke         (some stacks use POST)
  */
 export async function revokeConsent(id) {
-  const patchUrl = buildUrl(`consents/${encodeURIComponent(id)}/revoke`);
+  // Try PATCH first
   try {
-    return await doFetch(patchUrl, { method: "PATCH" });
+    const res = await doFetch(`${BASE}/consents/${encodeURIComponent(id)}/revoke`, {
+      method: "PATCH",
+    });
+    return res.json();
   } catch (e) {
-    if (e.status === 405 || e.status === 404) {
-      // Day7 fallback
-      return await doFetch(patchUrl, { method: "POST" });
-    }
-    throw e;
+    if (!/ 404 | 405 /.test(" " + String(e.message) + " ")) throw e;
   }
+
+  // Fallback: POST
+  const res2 = await doFetch(`${BASE}/consents/${encodeURIComponent(id)}/revoke`, {
+    method: "POST",
+  });
+  return res2.json();
 }
 
 /**
- * List audit events
- * Optional: consent_id
+ * List consents. Supports filtering by subject_id
+ * GET /api/v1/consents?subject_id=...
+ */
+export async function listConsents(subject_id) {
+  const url = subject_id
+    ? `${BASE}/consents?subject_id=${encodeURIComponent(subject_id)}`
+    : `${BASE}/consents`;
+  const res = await doFetch(url, { method: "GET" });
+  return res.json();
+}
+
+/**
+ * List audit events. Supports filtering by consent_id
+ * GET /api/v1/audit?consent_id=...
  */
 export async function listAudit(consent_id) {
-  const url = buildUrl("audit", consent_id ? { consent_id } : undefined);
-  return await doFetch(url, { method: "GET" });
+  const url = consent_id
+    ? `${BASE}/audit?consent_id=${encodeURIComponent(consent_id)}`
+    : `${BASE}/audit`;
+  const res = await doFetch(url, { method: "GET" });
+  return res.json();
 }
 
 /**
- * Export consents CSV (server-side)
- * Query: subject_id?, start_date?, end_date?
+ * Export Consents CSV (server-side)
+ * GET /api/v1/consents/export.csv?subject_id=&start_date=&end_date=
  */
-export async function exportConsentsCSV({ subject_id, start_date, end_date } = {}) {
-  const url = buildUrl("consents/export.csv", {
-    subject_id,
-    start_date,
-    end_date,
-  });
-  const res = await doFetch(url, { method: "GET" }); // doFetch returns Response if not JSON
-  // Download
+export async function exportConsentsCSV(params = {}) {
+  const q = new URLSearchParams();
+  if (params.subject_id) q.set("subject_id", params.subject_id);
+  if (params.start_date) q.set("start_date", params.start_date);
+  if (params.end_date) q.set("end_date", params.end_date);
+
+  const url = `${BASE}/consents/export.csv${q.toString() ? `?${q.toString()}` : ""}`;
+  const res = await doFetch(url, { method: "GET" });
   const blob = await res.blob();
+
   const a = document.createElement("a");
   const downloadUrl = URL.createObjectURL(blob);
   a.href = downloadUrl;
@@ -212,27 +174,21 @@ export async function exportConsentsCSV({ subject_id, start_date, end_date } = {
   URL.revokeObjectURL(downloadUrl);
 }
 
-// Optional: quick health probe (ok if 404; not used by UI)
+// ===== Convenience: optional health ping =====
 export async function ping() {
   try {
-    const r = await fetch(buildUrl("health"));
-    return r.ok;
+    const res = await fetch(`${BASE}/health`);
+    return res.ok;
   } catch {
     return false;
   }
 }
 
-/**
- * Helpers to manage/inspect the base at runtime (useful during debugging).
- */
-export function setApiBaseOverride(url) {
-  localStorage.setItem(BASE_KEY, trimSlashes(url));
-  return getApiBase();
-}
-export function clearApiBaseOverride() {
-  localStorage.removeItem(BASE_KEY);
-  return getApiBase();
-}
-export function getApiBase() {
-  return BASE;
+// ===== Helper to set/clear runtime override from UI if needed =====
+export function setApiBaseOverride(urlOrEmpty) {
+  if (!urlOrEmpty) {
+    try { localStorage.removeItem(BASE_KEY); } catch {}
+    return;
+  }
+  try { localStorage.setItem(BASE_KEY, stripTrailingSlash(String(urlOrEmpty))); } catch {}
 }
