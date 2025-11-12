@@ -1,35 +1,49 @@
 // frontend/consent-frontend/src/api.js
 
-// ===== Base URL resolution (works locally, same-origin, or cross-domain) =====
-const LOCAL_BASE = "http://127.0.0.1:8000/api/v1";
-const RELATIVE_BASE = "/api/v1";
-const BASE_KEY = "api_base_override";
-
 /**
- * Choose the API base:
- * 1) If localStorage has "api_base_override" use that (e.g. https://consent-poc.onrender.com/api/v1)
- * 2) If running on localhost/127.0.0.1, use LOCAL_BASE
- * 3) Otherwise, assume same-origin path /api/v1 (behind a reverse proxy)
+ * Deployment-safe API client
+ * - Local dev default: http://127.0.0.1:8000/api/v1
+ * - Render (separate FE/BE): set VITE_API_BASE or localStorage override
+ * - Avoids /api/v1/api/v1 by normalizing slashes
+ * - Endpoint fallback: tries canonical paths, then alternative backend paths
  */
+
+// -------------------- BASE resolution --------------------
+const LOCAL_BASE = "http://127.0.0.1:8000/api/v1";
+const RELATIVE_BASE = "/api/v1"; // for same-origin proxy setups
+const BASE_KEY = "api_base_override"; // localStorage key
+
+function normalizeBase(u) {
+  // Remove trailing slashes
+  return String(u || "").replace(/\/+$/, "");
+}
+
 function resolveBase() {
+  // 1) explicit override via env (Render recommended)
+  const envBase = (typeof import.meta !== "undefined" && import.meta.env && import.meta.env.VITE_API_BASE)
+    ? import.meta.env.VITE_API_BASE
+    : "";
+
+  if (envBase && envBase.trim()) return normalizeBase(envBase);
+
+  // 2) runtime override for quick fixes (no rebuild)
   try {
-    const override = localStorage.getItem(BASE_KEY);
-    if (override && override.trim()) {
-      return stripTrailingSlash(override.trim());
-    }
+    const ls = localStorage.getItem(BASE_KEY);
+    if (ls && ls.trim()) return normalizeBase(ls);
   } catch {}
+
+  // 3) heuristic: localhost vs hosted
   const host = (typeof window !== "undefined" && window.location && window.location.hostname) ? window.location.hostname : "";
   const isLocal = host === "localhost" || host === "127.0.0.1";
-  return isLocal ? LOCAL_BASE : RELATIVE_BASE;
+  if (isLocal) return normalizeBase(LOCAL_BASE);
+
+  // 4) default to relative (works only if you proxy /api/v1 at the FE domain)
+  return normalizeBase(RELATIVE_BASE);
 }
 
-function stripTrailingSlash(s) {
-  return s.replace(/\/+$/, "");
-}
+export const BASE = resolveBase();
 
-const BASE = resolveBase(); // e.g. "https://consent-poc.onrender.com/api/v1" or "/api/v1"
-
-// ===== Tiny auth helper (client-side only; your PoC login) =====
+// -------------------- Simple client-side auth (unchanged behavior) --------------------
 const AUTH_KEY = "simple_auth"; // { username: "user", loggedIn: true }
 
 export function getAuthState() {
@@ -50,117 +64,126 @@ export function clearAuthState() {
   try { localStorage.removeItem(AUTH_KEY); } catch {}
 }
 
-// ===== Fetch helper (uniform errors) =====
+// -------------------- Fetch helper --------------------
 async function doFetch(url, init) {
   const res = await fetch(url, init);
   if (!res.ok) {
-    let msg = "";
-    try { msg = await res.text(); } catch {}
-    throw new Error(`${init?.method || "GET"} ${url} → ${res.status} ${msg || res.statusText}`);
+    const text = await res.text().catch(() => "");
+    throw new Error(`${init?.method || "GET"} ${url} failed: ${res.status} ${text || res.statusText}`);
   }
   return res;
 }
 
-function jsonHeaders() {
-  return { "Content-Type": "application/json" };
-}
+// -------------------- Consents --------------------
 
-// ===== Consents & Audit API (with fallbacks to support both endpoint shapes) =====
+// Create/grant consent.
+// Canonical: POST `${BASE}/consents`
+// Fallback (your backend observation): POST `${BASE}/`
+export async function grantConsent(body) {
+  const first = `${BASE}/consents`;
+  const second = `${BASE}/`; // fallback
 
-/**
- * Grant consent.
- * Primary:   POST /api/v1/consents                      (Shape A)
- * Fallback:  POST /api/v1/consents/grant                (Shape B / older)
- */
-export async function grantConsent({ subject_id, data_use_case, meta }) {
-  const body = JSON.stringify({
-    subject_id,
-    data_use_case,
-    // keep compatibility for servers that still look at "purpose"
-    purpose: data_use_case,
-    meta,
-  });
-
-  // Try Shape A
-  try {
-    const res = await doFetch(`${BASE}/consents`, {
+  // try canonical
+  {
+    const res = await fetch(first, {
       method: "POST",
-      headers: jsonHeaders(),
-      body,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body || {}),
     });
-    return res.json();
-  } catch (e) {
-    // Only fall back on 404/405 (route missing or method mismatch)
-    if (!/ 404 | 405 /.test(" " + String(e.message) + " ")) throw e;
+    if (res.ok) return res.json();
+    // If the server says 404 or 405 etc., try fallback
+    if (res.status !== 200 && res.status !== 201) {
+      // proceed to fallback
+    } else {
+      // if other non-ok, still throw
+      const text = await res.text().catch(() => "");
+      throw new Error(`Grant failed: ${res.status} ${text}`);
+    }
   }
 
-  // Fallback Shape B
-  const res2 = await doFetch(`${BASE}/consents/grant`, {
-    method: "POST",
-    headers: jsonHeaders(),
-    body,
-  });
-  return res2.json();
-}
-
-/**
- * Revoke consent.
- * Primary:   PATCH /api/v1/consents/{id}/revoke         (Shape A)
- * Fallback:  POST  /api/v1/consents/{id}/revoke         (some stacks use POST)
- */
-export async function revokeConsent(id) {
-  // Try PATCH first
-  try {
-    const res = await doFetch(`${BASE}/consents/${encodeURIComponent(id)}/revoke`, {
-      method: "PATCH",
+  // fallback: POST /
+  {
+    const res = await fetch(second, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body || {}),
     });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`Grant failed (fallback): ${res.status} ${text}`);
+    }
     return res.json();
-  } catch (e) {
-    if (!/ 404 | 405 /.test(" " + String(e.message) + " ")) throw e;
   }
-
-  // Fallback: POST
-  const res2 = await doFetch(`${BASE}/consents/${encodeURIComponent(id)}/revoke`, {
-    method: "POST",
-  });
-  return res2.json();
 }
 
-/**
- * List consents. Supports filtering by subject_id
- * GET /api/v1/consents?subject_id=...
- */
+// List consents.
+// Canonical: GET `${BASE}/consents?subject_id=...`
+// Fallback:  GET `${BASE}/?subject_id=...`  (in case list also lives at root)
 export async function listConsents(subject_id) {
-  const url = subject_id
-    ? `${BASE}/consents?subject_id=${encodeURIComponent(subject_id)}`
-    : `${BASE}/consents`;
-  const res = await doFetch(url, { method: "GET" });
-  return res.json();
+  const q = subject_id ? `?subject_id=${encodeURIComponent(subject_id)}` : "";
+  const first = `${BASE}/consents${q}`;
+  const second = `${BASE}/${q}`;
+
+  // try canonical
+  {
+    const res = await fetch(first);
+    if (res.ok) return res.json();
+  }
+
+  // fallback
+  {
+    const res = await fetch(second);
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`List failed: ${res.status} ${text}`);
+    }
+    return res.json();
+  }
 }
 
-/**
- * List audit events. Supports filtering by consent_id
- * GET /api/v1/audit?consent_id=...
- */
+// Revoke consent.
+// Canonical (earlier docs): PATCH `${BASE}/consents/{id}/revoke`
+// Your correction (observed backend): PATCH `${BASE}/{id}/revoke`
+export async function revokeConsent(id) {
+  const first = `${BASE}/consents/${encodeURIComponent(id)}/revoke`;
+  const second = `${BASE}/${encodeURIComponent(id)}/revoke`;
+
+  // try canonical
+  {
+    const res = await fetch(first, { method: "PATCH" });
+    if (res.ok) return res.json();
+  }
+
+  // fallback (your backend wiring)
+  {
+    const res = await fetch(second, { method: "PATCH" });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`Revoke failed: ${res.status} ${text}`);
+    }
+    return res.json();
+  }
+}
+
+// -------------------- Audit --------------------
+
+// List audit events for a given consent_id.
+// (This one appears stable in your backend)
 export async function listAudit(consent_id) {
-  const url = consent_id
-    ? `${BASE}/audit?consent_id=${encodeURIComponent(consent_id)}`
-    : `${BASE}/audit`;
+  const url = `${BASE}/audit?consent_id=${encodeURIComponent(consent_id)}`;
   const res = await doFetch(url, { method: "GET" });
   return res.json();
 }
 
-/**
- * Export Consents CSV (server-side)
- * GET /api/v1/consents/export.csv?subject_id=&start_date=&end_date=
- */
-export async function exportConsentsCSV(params = {}) {
-  const q = new URLSearchParams();
-  if (params.subject_id) q.set("subject_id", params.subject_id);
-  if (params.start_date) q.set("start_date", params.start_date);
-  if (params.end_date) q.set("end_date", params.end_date);
+// Server CSV export for consents.
+// Canonical: GET `${BASE}/consents/export.csv?subject_id=&start_date=&end_date=`
+export async function exportConsentsCSV({ subject_id, start_date, end_date } = {}) {
+  const params = new URLSearchParams();
+  if (subject_id) params.set("subject_id", subject_id);
+  if (start_date) params.set("start_date", start_date);
+  if (end_date) params.set("end_date", end_date);
 
-  const url = `${BASE}/consents/export.csv${q.toString() ? `?${q.toString()}` : ""}`;
+  const url = `${BASE}/consents/export.csv${params.toString() ? `?${params.toString()}` : ""}`;
   const res = await doFetch(url, { method: "GET" });
   const blob = await res.blob();
 
@@ -174,7 +197,7 @@ export async function exportConsentsCSV(params = {}) {
   URL.revokeObjectURL(downloadUrl);
 }
 
-// ===== Convenience: optional health ping =====
+// Optional tiny health check (not used by UI)
 export async function ping() {
   try {
     const res = await fetch(`${BASE}/health`);
@@ -182,13 +205,4 @@ export async function ping() {
   } catch {
     return false;
   }
-}
-
-// ===== Helper to set/clear runtime override from UI if needed =====
-export function setApiBaseOverride(urlOrEmpty) {
-  if (!urlOrEmpty) {
-    try { localStorage.removeItem(BASE_KEY); } catch {}
-    return;
-  }
-  try { localStorage.setItem(BASE_KEY, stripTrailingSlash(String(urlOrEmpty))); } catch {}
 }
