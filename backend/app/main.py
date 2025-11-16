@@ -2,8 +2,14 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1 import api_v1
+from .database import engine
+from . import models
+
 
 app = FastAPI(title="Consent PoC API", version="0.1")
+# Ensure all tables are created on startup (PoC-friendly)
+models.Base.metadata.create_all(bind=engine)
+
 
 # CORS for local dev
 origins = [

@@ -8,8 +8,9 @@ from datetime import datetime
 import csv
 import io
 
+from sqlalchemy import func
 from app.deps import get_db, get_actor
-from app.models import Consent, AuditLog
+from app.models import Consent, AuditLog, ConsentTemplate
 
 router = APIRouter()
 
@@ -19,12 +20,38 @@ router = APIRouter()
 
 class ConsentCreate(BaseModel):
     subject_id: str = Field(..., example="user-123")
+
     # Preferred domain field:
-    data_use_case: Optional[str] = Field(None, example="marketing", description="Preferred field for purpose")
+    data_use_case: Optional[str] = Field(
+        None,
+        example="marketing",
+        description="Preferred field for purpose",
+    )
     # Legacy alias still accepted so older clients keep working:
-    purpose: Optional[str] = Field(None, example="marketing", description="Legacy alias")
+    purpose: Optional[str] = Field(
+        None,
+        example="marketing",
+        description="Legacy alias for purpose",
+    )
+
     source: Optional[str] = "web_form"
     meta: Optional[Dict] = None
+
+    # --- Phase-II BFSI optional fields (all nullable) ---
+    tenant_id: Optional[str] = None
+    product_id: Optional[str] = None
+
+    # NOTE: we do NOT redefine 'purpose' again here.
+    # BFSI purpose taxonomy still uses the same purpose/data_use_case field above.
+
+    source_channel: Optional[str] = None         # e.g. web_app_customer, web_app_branch_officer
+    actor_type: Optional[str] = None             # e.g. customer, branch_officer
+
+    application_number: Optional[str] = None     # e.g. APP12345
+    mobile_number: Optional[str] = None
+
+    version: Optional[int] = None                # consent version
+    evidence_ref: Optional[str] = None           # OTP txn id or other proof
 
     def resolved_use_case(self) -> str:
         """Prefer data_use_case; fall back to purpose."""
@@ -40,9 +67,46 @@ class ConsentOut(BaseModel):
     meta: Optional[Dict] = None
     status: str
 
+    # --- Phase-II BFSI optional fields (all nullable) ---
+    tenant_id: Optional[str] = None
+    product_id: Optional[str] = None
+
+    source_channel: Optional[str] = None
+    actor_type: Optional[str] = None
+
+    application_number: Optional[str] = None
+    mobile_number: Optional[str] = None
+
+    version: Optional[int] = None
+    evidence_ref: Optional[str] = None
+
     class Config:
         orm_mode = True
 
+class ConsentTemplateOut(BaseModel):
+    id: str
+    tenant_id: str
+    product_id: str
+    purpose: str
+    template_type: str
+    version: int
+    title: Optional[str] = None
+    body_text: Optional[str] = None
+    is_active: bool
+    created_at: datetime
+
+    class Config:
+        orm_mode = True
+
+
+class ConsentTemplateCreate(BaseModel):
+    tenant_id: str
+    product_id: str
+    purpose: str
+    template_type: str
+    title: Optional[str] = None
+    body_text: Optional[str] = None
+    is_active: Optional[bool] = True
 
 # ============================
 # Helpers
@@ -57,6 +121,16 @@ def _row_to_out(c: Consent) -> ConsentOut:
         source=c.source,
         meta=c.meta,
         status=c.status,
+
+        # --- Phase-II BFSI fields ---
+        tenant_id=getattr(c, "tenant_id", None),
+        product_id=getattr(c, "product_id", None),
+        source_channel=getattr(c, "source_channel", None),
+        actor_type=getattr(c, "actor_type", None),
+        application_number=getattr(c, "application_number", None),
+        mobile_number=getattr(c, "mobile_number", None),
+        version=getattr(c, "version", None),
+        evidence_ref=getattr(c, "evidence_ref", None),
     )
 
 
@@ -164,15 +238,26 @@ def grant_consent(
 
     consent_id = str(uuid4())
     consent = Consent(
-        id=consent_id,
-        subject_id=payload.subject_id,
-        # DB column is named `purpose`; we store the resolved use case in it
-        purpose=use_case,
-        status="granted",
-        source=payload.source,
-        meta=payload.meta,
-    )
+    id=consent_id,
+    subject_id=payload.subject_id,
+    # DB column is named `purpose`; we store the resolved use case in it
+    purpose=use_case,
+    status="granted",
+    source=payload.source,
+    meta=payload.meta,
+
+    # --- Phase-II BFSI fields (all optional/nullable in the DB) ---
+    tenant_id=getattr(payload, "tenant_id", None),
+    product_id=getattr(payload, "product_id", None),
+    source_channel=getattr(payload, "source_channel", None),
+    actor_type=getattr(payload, "actor_type", None),
+    application_number=getattr(payload, "application_number", None),
+    mobile_number=getattr(payload, "mobile_number", None),
+    version=getattr(payload, "version", None),
+    evidence_ref=getattr(payload, "evidence_ref", None),
+)
     db.add(consent)
+
 
     db.add(
         AuditLog(
@@ -180,9 +265,21 @@ def grant_consent(
             consent_id=consent_id,
             action="granted",
             actor=actor,
+
+            # BFSI context snapshot from the consent row
+            product_id=consent.product_id,
+            purpose=consent.purpose,
+            source_channel=getattr(consent, "source_channel", None),
+            actor_type=getattr(consent, "actor_type", None),
+            application_number=getattr(consent, "application_number", None),
+            mobile_number=getattr(consent, "mobile_number", None),
+            evidence_ref=getattr(consent, "evidence_ref", None),
+
+            # Keep existing details behavior
             details=payload.meta,
         )
     )
+
 
     db.commit()
 
@@ -203,6 +300,72 @@ def list_consents(
         q = q.filter(Consent.subject_id == subject_id)
     rows = q.all()
     return [_row_to_out(c) for c in rows]
+
+# ============================
+# Consent Template management
+# ============================
+
+@router.get(
+    "/templates",
+    response_model=List[ConsentTemplateOut],
+    summary="List consent templates",
+)
+def list_consent_templates(
+    db: Session = Depends(get_db),
+):
+    q = (
+        db.query(ConsentTemplate)
+        .order_by(
+            ConsentTemplate.tenant_id,
+            ConsentTemplate.product_id,
+            ConsentTemplate.purpose,
+            ConsentTemplate.template_type,
+            ConsentTemplate.version,
+        )
+    )
+    return q.all()
+
+
+@router.post(
+    "/templates",
+    response_model=ConsentTemplateOut,
+    status_code=201,
+    summary="Create a new consent template version",
+)
+def create_consent_template(
+    payload: ConsentTemplateCreate,
+    db: Session = Depends(get_db),
+):
+    # Determine next version based on existing templates for this combination
+    max_version = (
+        db.query(func.max(ConsentTemplate.version))
+        .filter(
+            ConsentTemplate.tenant_id == payload.tenant_id,
+            ConsentTemplate.product_id == payload.product_id,
+            ConsentTemplate.purpose == payload.purpose,
+            ConsentTemplate.template_type == payload.template_type,
+        )
+        .scalar()
+    ) or 0
+
+    next_version = max_version + 1
+
+    tmpl = ConsentTemplate(
+        id=str(uuid4()),
+        tenant_id=payload.tenant_id,
+        product_id=payload.product_id,
+        purpose=payload.purpose,
+        template_type=payload.template_type,
+        version=next_version,
+        title=payload.title,
+        body_text=payload.body_text,
+        is_active=True if payload.is_active is None else payload.is_active,
+    )
+
+    db.add(tmpl)
+    db.commit()
+    db.refresh(tmpl)
+    return tmpl
 
 
 @router.get(
@@ -242,9 +405,23 @@ def revoke_consent(
             consent_id=consent_id,
             action="revoked",
             actor=actor,
+
+            # BFSI context snapshot at time of revocation
+            product_id=c.product_id,
+            purpose=c.purpose,
+            source_channel=getattr(c, "source_channel", None),
+            actor_type=getattr(c, "actor_type", None),
+            application_number=getattr(c, "application_number", None),
+            mobile_number=getattr(c, "mobile_number", None),
+            evidence_ref=getattr(c, "evidence_ref", None),
+
             details={"reason": "user_action"},
         )
     )
+
+
+
+    
 
     db.commit()
     return _row_to_out(c)

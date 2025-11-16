@@ -66,17 +66,6 @@ function Dot({ action }) {
 }
 
 export default function AuditTimeline({ events }) {
-  if (!events || events.length === 0) {
-    return (
-      <div style={{
-        padding: 12, border: "1px dashed #d6d6d6", borderRadius: 8,
-        background: "#fafafa", color: "#777"
-      }}>
-        No audit data yet. Trigger an action (grant or revoke) and check again.
-      </div>
-    );
-  }
-
   return (
     <div style={{ marginTop: 12 }}>
       <div style={{ borderLeft: "3px solid #e3e3e3", paddingLeft: 16 }}>
@@ -105,6 +94,39 @@ export default function AuditTimeline({ events }) {
               <div style={{ fontSize: 13, opacity: 0.85, marginTop: 2 }}>
                 {ev.actor ? <>actor: <code>{ev.actor}</code></> : "actor: –"}
               </div>
+
+              {/* BFSI context badges: product / purpose / channel+actor_type / evidence_ref */}
+              {(
+                ev.product_id ||
+                ev.purpose ||
+                ev.source_channel ||
+                ev.actor_type ||
+                ev.evidence_ref
+              ) && (
+                <div style={{ fontSize: 12, color: "#555", marginTop: 4, display: "flex", flexWrap: "wrap", gap: 6 }}>
+                  {ev.product_id && (
+                    <span style={{ border: "1px solid #ddd", borderRadius: 999, padding: "2px 8px" }}>
+                      {ev.product_id}
+                    </span>
+                  )}
+                  {ev.purpose && (
+                    <span style={{ border: "1px solid #ddd", borderRadius: 999, padding: "2px 8px" }}>
+                      {ev.purpose}
+                    </span>
+                  )}
+                  {(ev.source_channel || ev.actor_type) && (
+                    <span style={{ border: "1px solid #ddd", borderRadius: 999, padding: "2px 8px" }}>
+                      {[ev.source_channel, ev.actor_type].filter(Boolean).join(" / ")}
+                    </span>
+                  )}
+                  {ev.evidence_ref && (
+                    <span style={{ border: "1px solid #ddd", borderRadius: 999, padding: "2px 8px" }}>
+                      evidence: {ev.evidence_ref}
+                    </span>
+                  )}
+                </div>
+              )}
+
 
               {details && (
                 <pre style={{
